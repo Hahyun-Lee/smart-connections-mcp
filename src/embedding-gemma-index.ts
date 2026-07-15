@@ -39,6 +39,17 @@ function normalize(vector: number[]): number[] {
   return magnitude === 0 ? vector : vector.map((value) => value / magnitude);
 }
 
+// v1 fork compatibility: its incremental builder stored `length:signed-int`
+// hashes. Accepting that representation avoids a needless full-vault re-embed
+// on the first v2 sync; changed notes are rewritten with SHA-256.
+function legacyContentHash(text: string): string {
+  let value = 0;
+  for (let i = 0; i < text.length; i++) {
+    value = ((value << 5) - value + text.charCodeAt(i)) | 0;
+  }
+  return `${text.length}:${value}`;
+}
+
 async function ensureModel(): Promise<void> {
   if (tokenizer && model) return;
   if (!loadPromise) {
@@ -181,7 +192,10 @@ export class EmbeddingGemmaIndex {
       }
       const hash = crypto.createHash('sha256').update(content).digest('hex');
       const previous = this.index.entries[notePath];
-      if (previous?.block_type === 'full' && previous.hash === hash) {
+      if (
+        previous?.block_type === 'full' &&
+        (previous.hash === hash || previous.hash === legacyContentHash(content))
+      ) {
         unchanged++;
         continue;
       }

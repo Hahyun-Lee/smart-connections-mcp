@@ -41,4 +41,45 @@ describe('EmbeddingGemmaIndex', () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('accepts the v1 legacy hash without loading a model or re-embedding', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'scmcp-gemma-v1-'));
+    try {
+      fs.mkdirSync(path.join(tmp, '.smart-env'));
+      const content = 'unchanged legacy content long enough for incremental indexing';
+      let value = 0;
+      for (let i = 0; i < content.length; i++) {
+        value = ((value << 5) - value + content.charCodeAt(i)) | 0;
+      }
+      fs.writeFileSync(
+        path.join(tmp, '.smart-env', 'embedding-index.json'),
+        JSON.stringify({
+          model: 'onnx-community/embeddinggemma-300m-ONNX',
+          dimension: 768,
+          version: 4,
+          created_at: 1,
+          updated_at: 1,
+          entries: {
+            'Legacy.md': {
+              vec: [1, 0, 0],
+              note_path: 'Legacy.md',
+              block_key: '__full__',
+              block_type: 'full',
+              char_length: content.length,
+              hash: `${content.length}:${value}`,
+              updated_at: 1,
+            },
+          },
+        }),
+      );
+      const index = new EmbeddingGemmaIndex(tmp);
+      await expect(index.sync(['Legacy.md'], () => content)).resolves.toMatchObject({
+        updated: 0,
+        unchanged: 1,
+        deleted: 0,
+      });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
