@@ -127,6 +127,21 @@ export class EmbeddingGemmaIndex {
     return results.sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
+  similarByPath(
+    notePath: string,
+    allowedPaths: Set<string>,
+    limit: number,
+    threshold: number,
+  ): Array<{ path: string; score: number }> | null {
+    const source = Object.values(this.index.entries).find(
+      (entry) => entry.block_type === 'full' && entry.note_path === notePath,
+    );
+    if (!source) return null;
+    return this.searchStoredVector(source.vec, allowedPaths, limit + 1, threshold)
+      .filter((item) => item.path !== notePath)
+      .slice(0, limit);
+  }
+
   async search(
     query: string,
     allowedPaths: Set<string>,

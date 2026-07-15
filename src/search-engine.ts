@@ -358,6 +358,15 @@ export class SearchEngine {
     const { vault, threshold = 0.5, limit = 10 } = opts;
     for (const candidate of this.registry.byName(vault)) candidate.maybeReload();
     const v = this.registry.resolveNote(notePath, vault);
+    const gemmaSimilar = v.gemma.similarByPath(notePath, v.notePathSet(), limit, threshold);
+    if (gemmaSimilar) {
+      return gemmaSimilar.map((item) => ({
+        path: item.path,
+        vault: v.name,
+        similarity: round(item.score),
+        blocks: Object.keys(v.data.sources.get(item.path)?.blocks ?? {}),
+      }));
+    }
     const vec = v.data.sources.get(notePath)?.embeddings?.[v.modelKey]?.vec;
     if (!vec) throw new EmbedUnavailableError(`No stored embedding for note: ${notePath}`);
     return v.index

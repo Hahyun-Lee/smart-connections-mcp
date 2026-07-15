@@ -26,7 +26,9 @@ do per query.
 - All inference and indexing are local. Model files are downloaded once and then
   cached by Transformers.js.
 - The upstream tools remain: `get_similar_notes`, `get_connection_graph`,
-  `get_note_content`, `get_stats`, and `list_vaults`.
+  `get_note_content`, `get_stats`, and `list_vaults`. Similar-note and graph
+  traversal prefer stored EmbeddingGemma note vectors, including disk-only
+  notes, and fall back to plugin vectors when no Gemma entry exists.
 
 ## Search profiles
 

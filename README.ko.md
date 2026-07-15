@@ -19,6 +19,9 @@ recall과 대화형 속도를 함께 확보하는 것이 목적입니다.
   실행합니다.
 - 각 결과가 어떤 retrieval leg에서 왔는지 `retrieval`과 `scoreType`으로
   표시합니다.
+- `get_similar_notes`와 connection graph도 저장된 EmbeddingGemma note vector를
+  우선 사용하여 plugin 미색인 note를 연결하고, 해당 vector가 없으면 plugin
+  vector로 fallback합니다.
 
 ## Profile
 

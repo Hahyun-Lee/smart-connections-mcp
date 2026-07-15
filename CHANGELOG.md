@@ -11,6 +11,8 @@
   not yet represented in the Smart Connections plugin index.
 - Batched bge-reranker-v2-m3 for the conditional and quality profiles.
 - Retrieval provenance and score type on every hybrid result.
+- EmbeddingGemma-first similar-note and connection-graph traversal, with plugin
+  vector fallback for notes absent from the independent index.
 
 ### Fixed
 - Cap the actual tokenizer configuration to the embedding model's position limit,
