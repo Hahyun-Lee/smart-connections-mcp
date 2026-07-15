@@ -82,14 +82,28 @@ describe('Vault.maybeReload', () => {
     v.maybeReload(t0 + 500);
     expect(v.stats().notes).toBe(5);
     v.maybeReload(t0 + 2500);
-    expect(v.stats().notes).toBe(4);
+    // AJSON deletion removes the plugin vector, but the live Markdown remains
+    // available to disk/BM25 discovery.
+    expect(v.stats().notes).toBe(5);
+    expect(v.index.topK([0, 0, 0, 1, 0, 0, 0, 0], 1, 0.9)).toEqual([]);
   });
 
   it('handles a removed ajson file with a full reload', () => {
     const v = Vault.load(tmp, 't');
     fs.rmSync(path.join(tmp, '.smart-env/multi/Sub_Beta_md.ajson'));
     v.maybeReload(5_000_000);
-    expect(v.stats().notes).toBe(3);
-    expect(v.data.sources.has('Sub/Beta.md')).toBe(false);
+    expect(v.stats().notes).toBe(4);
+    expect(v.data.sources.has('Sub/Beta.md')).toBe(true);
+    expect(v.stats().diskOnlyNotes).toBeGreaterThan(0);
+  });
+
+  it('discovers a disk-only note and removes a stale source whose file is gone', () => {
+    const v = Vault.load(tmp, 't');
+    fs.writeFileSync(path.join(tmp, 'DiskOnly.md'), '# Disk only\n새로운 디스크 노트입니다.\n');
+    fs.rmSync(path.join(tmp, 'Gamma.md'));
+    v.maybeReload(9_000_000);
+    expect(v.data.sources.has('DiskOnly.md')).toBe(true);
+    expect(v.data.sources.has('Gamma.md')).toBe(false);
+    expect(v.notePaths()).toContain('DiskOnly.md');
   });
 });

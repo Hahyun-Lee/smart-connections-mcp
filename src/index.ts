@@ -29,7 +29,7 @@ const engine = new SearchEngine(registry, new Embedder());
 const server = buildServer(engine);
 await server.connect(new StdioServerTransport());
 console.error(
-  `smart-connections-mcp v2 ready — ${registry.vaults
+  `smart-connections-mcp v2 ready (profile=${engine.profile}) — ${registry.vaults
     .map((v) => `${v.name} (${v.stats().notes} notes)`)
     .join(', ')}`,
 );

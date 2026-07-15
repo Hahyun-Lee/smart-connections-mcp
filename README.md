@@ -1,91 +1,131 @@
-# Smart Connections MCP Server
+# Smart Connections MCP — v2 Hybrid
 
-**Give Claude true semantic memory of your Obsidian vault.** An MCP server that
-searches your notes by *meaning* — reusing the embeddings the
-[Smart Connections](https://github.com/brianpetro/obsidian-smart-connections)
-Obsidian plugin already generated, and running the same embedding model locally
-to understand your queries. No cloud calls; your vault never leaves your machine.
+**Fast, local retrieval over the notes that actually exist in your Obsidian vault.**
 
-[![MCP](https://img.shields.io/badge/MCP-Model_Context_Protocol-1f6feb)](https://modelcontextprotocol.io/)
-[![Obsidian](https://img.shields.io/badge/Obsidian-Smart_Connections-7c3aed)](https://github.com/brianpetro/obsidian-smart-connections)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/msdanyg/smart-connections-mcp?style=social)](https://github.com/msdanyg/smart-connections-mcp/stargazers)
+This fork keeps the modular v2 MCP server and adds adaptive hybrid retrieval:
+Smart Connections embeddings, direct disk discovery, multilingual BM25,
+EmbeddingGemma, and an optional reranker. It is intended for long-running agents
+that need both semantic recall and predictable interactive latency without
+sending the vault to a cloud search service.
 
-## What it does
+[한국어](README.ko.md) · [Upstream v2](https://github.com/msdanyg/smart-connections-mcp)
 
-- **`search_notes`** — semantic search across one or many vaults. Matches whole
-  notes *and* individual sections (blocks), returns similarity-ranked results
-  with content snippets.
-- **`get_similar_notes`** — notes similar to a given note (stored embeddings).
-- **`get_connection_graph`** — walk similarity links outward to map related ideas.
-- **`get_note_content`** — read a note, or extract specific blocks.
-- **`list_vaults` / `get_stats`** — what's loaded, counts, models, load errors.
+## Why this fork exists
 
-## Requirements
+A plugin embedding index alone can miss new files, return deleted paths, or spend
+too long reranking every candidate. A lexical-only search misses paraphrases.
+This server treats those as separate retrieval legs and chooses how much work to
+do per query.
 
-- Node.js 20+
-- An Obsidian vault with the Smart Connections plugin installed and embeddings
-  generated (v2 tested against Smart Connections 3.x data)
-- An MCP client (Claude Desktop, Claude Code, …)
+- `search_notes` searches whole notes or plugin-indexed blocks and returns a
+  short snippet, the contributing retrieval legs, and the score type.
+- Markdown is reconciled from disk, so plugin-unindexed notes remain searchable
+  and deleted notes are filtered out.
+- EmbeddingGemma is an optional, independent semantic index. Existing v4
+  `.smart-env/embedding-index.json` files are reused.
+- All inference and indexing are local. Model files are downloaded once and then
+  cached by Transformers.js.
+- The upstream tools remain: `get_similar_notes`, `get_connection_graph`,
+  `get_note_content`, `get_stats`, and `list_vaults`.
 
-## Setup (Claude Desktop)
+## Search profiles
 
-Add to `claude_desktop_config.json` and restart Claude Desktop:
+Set `SMART_SEARCH_PROFILE` to one of:
+
+| profile | retrieval path | use it when |
+|---|---|---|
+| `adaptive` (default) | fast agreement first; conditional EmbeddingGemma + 6-item rerank | interactive agent use |
+| `fast` | Smart Connections dense + BM25 | latency matters most |
+| `balanced` | dense + EmbeddingGemma + BM25 | top-10 coverage matters more than first-result precision |
+| `quality` | all legs + a larger batched rerank | offline/high-recall inspection |
+| `plugin` | upstream v2 behavior | compatibility or ablation |
+
+The adaptive rerank pool can be changed with `SMART_RERANK_CANDIDATES`.
+
+## Install from this repository
+
+Requires Node.js 20+, an Obsidian vault with Smart Connections embeddings, and
+an MCP client such as Claude Desktop or Claude Code.
+
+```bash
+git clone https://github.com/Hahyun-Lee/smart-connections-mcp.git
+cd smart-connections-mcp
+npm ci
+npm run build
+```
+
+Configure the MCP client with the built entry point:
 
 ```json
 {
   "mcpServers": {
     "smart-connections": {
-      "command": "npx",
-      "args": ["-y", "smart-connections-mcp"],
+      "command": "node",
+      "args": ["/absolute/path/to/smart-connections-mcp/dist/index.js"],
       "env": {
-        "SMART_VAULT_PATH": "/path/to/Vault One,/path/to/Vault Two"
+        "SMART_VAULT_PATH": "/absolute/path/to/Vault One,/absolute/path/to/Vault Two",
+        "SMART_SEARCH_PROFILE": "adaptive"
       }
     }
   }
 }
 ```
 
-One vault or several — separate paths with commas.
+`SMART_VAULT_PATHS` is accepted as an alias and takes precedence when both forms
+are set. Restart the MCP client after changing its configuration.
 
-`SMART_VAULT_PATHS` (plural) is also accepted as an alias for `SMART_VAULT_PATH` and takes
-precedence over it if both are set.
+The npm package named `smart-connections-mcp` currently refers to the upstream
+release, not this hybrid fork. Use the source installation above for the hybrid
+profiles until a separately named package is published.
 
-### Claude Code
+## Optional EmbeddingGemma index
+
+`adaptive`, `balanced`, and `quality` can reuse an existing compatible index. To
+create or incrementally refresh it:
 
 ```bash
-claude mcp add smart-connections -e SMART_VAULT_PATH="/path/to/vault" -- npx -y smart-connections-mcp
+SMART_VAULT_PATH="/absolute/path/to/vault" npm run reindex
 ```
 
-## How it works
+The first run downloads `onnx-community/embeddinggemma-300m-ONNX`. If the index
+is absent or the model cannot load, plugin-dense and BM25 retrieval remain
+available and the response includes a warning.
 
-Smart Connections stores an embedding vector for every note and block in
-`.smart-env/`. This server loads those vectors into memory and, when you search,
-embeds your query with the *same model* your vault used (downloaded once,
-~25MB, runs locally via transformers.js). Results are ranked by cosine
-similarity. Edits you make in Obsidian are picked up automatically.
+## Operational benchmark
 
-If the embedding model can't load (e.g. no network on very first run), search
-degrades to literal keyword matching and says so explicitly
-(`"mode": "keyword-fallback"`). When only some vaults fall back, `mode` stays
-`"semantic"`, those rows carry `"match": "keyword"`, and they always rank
-after the true semantic rows.
+We compared the previous production fork and this migration on one actively used
+804-note vault with 65 English semantic, Korean semantic, exact/common, and
+disk-only coverage queries.
 
-## Migrating from v1
+| implementation/profile | R@1 | R@10 | median | p95 | stale top-10 hits |
+|---|---:|---:|---:|---:|---:|
+| previous v1 fork | 81.5% | 95.4% | 8,141 ms | 13,537 ms | 4 |
+| v2 `adaptive` | 76.9% | 93.8% | 743 ms | 1,221 ms | 0 |
+| v2 `balanced` | 56.9% | 95.4% | 92 ms | 227 ms | 0 |
+| v2 `quality` | 67.7% | 98.5% | 3,706 ms | 4,173 ms | 0 |
 
-- `get_embedding_neighbors` was removed.
-- `search_notes` is now genuinely semantic and its response includes `vault`,
-  `scope`, `block`, `snippet`, and `mode` fields.
-- Everything else is backward compatible; single-vault `SMART_VAULT_PATH`
-  configs work unchanged.
+`adaptive` is the operational default because it is about 11× faster at median
+and p95 while keeping most of the old ranking quality. The previous fork still
+has higher R@1; this is a measured tradeoff, not a claim of universal
+superiority. The dataset is one private vault, so these results support this
+deployment decision rather than a general multi-domain benchmark claim. Private
+note text and paths are not published.
 
-## Development
+## Migrating from upstream v2
+
+The six tools and v2 response envelope remain. `search_notes` adds `profile`,
+`retrieval`, and `scoreType`; clients that already read the v2 `results` array
+continue to work. Use `SMART_SEARCH_PROFILE=plugin` for upstream v2 search
+behavior.
+
+## Development and verification
 
 ```bash
-npm install
-npm test              # build + CI-tier tests (no network)
-npm run test:live     # + real-model tests (downloads ~25MB once)
+npm test
+npm run test:live
 npm run smoke -- "/path/to/vault" "your query"
 ```
 
-MIT — see [LICENSE](LICENSE).
+This work is based on Daniel Glickman's MIT-licensed
+[Smart Connections MCP](https://github.com/msdanyg/smart-connections-mcp).
+See [CHANGELOG.md](CHANGELOG.md) and [LICENSE](LICENSE).

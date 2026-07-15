@@ -1,12 +1,14 @@
 {
   "name": "smart-connections-mcp",
-  "version": "2.0.0",
-  "mcpName": "io.github.msdanyg/smart-connections-mcp",
-  "description": "MCP server for true local semantic search over Obsidian vaults using Smart Connections embeddings — multi-vault, block-level retrieval, no cloud calls",
+  "version": "2.0.0-brainai.1",
+  "mcpName": "io.github.hahyun-lee/smart-connections-mcp",
+  "private": true,
+  "description": "A v2-based local hybrid search MCP for Obsidian: Smart Connections, EmbeddingGemma, BM25, reranking, and disk discovery",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "smart-connections-mcp": "./dist/index.js"
+    "smart-connections-mcp": "./dist/index.js",
+    "smart-connections-reindex": "./dist/reindex.js"
   },
   "files": [
     "dist",
@@ -21,6 +23,8 @@
     "test": "npm run build && vitest run",
     "test:live": "LIVE_TESTS=1 vitest run",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:summary": "node scripts/smoke-summary.mjs",
+    "reindex": "node dist/reindex.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -38,18 +42,15 @@
     "anthropic",
     "pkm"
   ],
-  "author": "Daniel Glickman",
+  "author": "Daniel Glickman and contributors",
   "license": "MIT",
-  "homepage": "https://github.com/msdanyg/smart-connections-mcp#readme",
+  "homepage": "https://github.com/Hahyun-Lee/smart-connections-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/msdanyg/smart-connections-mcp.git"
+    "url": "git+https://github.com/Hahyun-Lee/smart-connections-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/msdanyg/smart-connections-mcp/issues"
-  },
-  "publishConfig": {
-    "access": "public"
+    "url": "https://github.com/Hahyun-Lee/smart-connections-mcp/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

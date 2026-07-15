@@ -8,7 +8,7 @@ loaded, so the server fell back to literal keyword matching and told you so
 explicitly (rather than silently degrading).
 
 **Fix**: the model (~25MB) downloads from Hugging Face on first use and is then
-cached locally forever. Check your network connection once — if the machine had
+cached locally. Check your network connection once — if the machine had
 no internet on the very first run, the download never completed. Restart the
 server (or Claude Desktop) with network access and it will retry the download;
 subsequent runs work fully offline.
@@ -31,6 +31,24 @@ embedding models cap out near 512 tokens); the server logs a notice to stderr
 when this happens. If you're pasting a long passage as a "query," keep it short
 and specific instead — semantic search works better on a focused question than
 a wall of text anyway.
+
+## Search is unexpectedly slow
+
+Check the `profile` field returned by `search_notes` and the server startup log.
+`quality` deliberately reranks a larger candidate pool and is not intended as
+the interactive default. Start with `SMART_SEARCH_PROFILE=adaptive`; use `fast`
+when latency matters more than semantic first-result precision.
+
+The first semantic query in a new server process is slower because local models
+must be loaded. MCP clients should keep the stdio server alive instead of
+launching a new process for every query.
+
+## A deleted note appears in results
+
+The hybrid profiles reconcile results with Markdown currently on disk. Confirm
+you are running this fork and that the response says `profile` is `adaptive`,
+`fast`, `balanced`, or `quality`. `plugin` is the upstream-compatible ablation
+profile. Restart once after upgrading from an older build.
 
 ## Server not appearing in Claude Desktop
 
@@ -72,7 +90,7 @@ restart, not just a refresh:
 
 1. Test the server directly, the same way Claude Desktop launches it:
    ```bash
-   SMART_VAULT_PATH="/path/to/vault" npx -y smart-connections-mcp
+   SMART_VAULT_PATH="/path/to/vault" SMART_SEARCH_PROFILE=adaptive node /absolute/path/to/smart-connections-mcp/dist/index.js
    ```
    Look for log lines confirming the vault(s) loaded, then press Ctrl+C to stop.
 2. Temporarily remove the `"smart-connections"` entry from

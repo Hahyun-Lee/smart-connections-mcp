@@ -1,7 +1,9 @@
 /** Orchestrates search, similarity, graphs, content, and stats across vaults. */
 
 import type { EmbedFn } from './embedder.js';
+import { BM25Index } from './bm25.js';
 import { BlockNotFoundError, EmbedUnavailableError } from './errors.js';
+import { rerank } from './reranker.js';
 import type {
   ConnectionGraph,
   SearchResponse,
@@ -23,14 +25,228 @@ export interface QueryEmbedder {
 
 const SNIPPET_MAX = 700;
 const round = (n: number) => Math.round(n * 10_000) / 10_000;
+export type SearchProfile = 'plugin' | 'fast' | 'balanced' | 'adaptive' | 'quality';
+
+function profileFrom(value: string | undefined): SearchProfile {
+  return value === 'plugin' || value === 'fast' || value === 'quality' || value === 'balanced' || value === 'adaptive'
+    ? value
+    : 'adaptive';
+}
+
+function likelyExactQuery(query: string): boolean {
+  return /\b(?:19|20)\d{2}\b|\b10\.\d{4,9}\/\S+|["“”][^"“”]+["“”]/i.test(query);
+}
 
 export class SearchEngine {
+  readonly profile: SearchProfile;
+  private bm25 = new Map<string, { revision: number; index: BM25Index }>();
+
   constructor(
     private registry: VaultRegistry,
     private embedder: QueryEmbedder,
-  ) {}
+    options: { profile?: SearchProfile } = {},
+  ) {
+    this.profile = options.profile ?? profileFrom(process.env.SMART_SEARCH_PROFILE);
+  }
 
   async search(
+    query: string,
+    opts: { vault?: string; scope?: 'notes' | 'blocks' | 'both'; limit?: number; threshold?: number } = {},
+  ): Promise<SearchResponse> {
+    if (this.profile === 'plugin' || opts.scope === 'blocks') {
+      return this.pluginSearch(query, opts);
+    }
+
+    const { vault, scope = 'both', limit = 10, threshold = 0.4 } = opts;
+    const vaults = this.registry.byName(vault);
+    const poolSize = Math.max(20, limit * 3);
+    const warnings: string[] = [];
+    const fallbackVaults: string[] = [];
+    const candidates: SearchResult[] = [];
+    let semanticSucceeded = false;
+    const exactQuery = likelyExactQuery(query);
+
+    for (const v of vaults) {
+      v.maybeReload();
+      const rankedLists: Array<{
+        name: 'plugin-dense' | 'embedding-gemma' | 'bm25';
+        weight: number;
+        items: Array<{ path: string; result: SearchResult }>;
+      }> = [];
+
+      try {
+        const embed = await this.embedder.getEmbedFn(v.modelKey, v.paritySample(), (message) =>
+          warnings.push(`${v.name}: ${message}`),
+        );
+        const vector = await embed(query);
+        const filter = scope === 'notes' ? (entry: IndexEntry) => entry.kind === 'note' : undefined;
+        const matches = v.index.topK(vector, poolSize, threshold, filter);
+        rankedLists.push({
+          name: 'plugin-dense',
+          weight: 0.8,
+          items: matches.map((match) => ({
+            path: match.entry.notePath,
+            result: this.toResult(v, match.entry, match.similarity),
+          })),
+        });
+        semanticSucceeded = true;
+      } catch (error) {
+        if (!(error instanceof EmbedUnavailableError)) throw error;
+        fallbackVaults.push(v.name);
+      }
+
+      const lexical = this.bm25For(v).topK(query, poolSize);
+      rankedLists.push({
+        name: 'bm25',
+        weight: 0.8,
+        items: lexical.map((hit) => ({
+          path: hit.id,
+          result: {
+            path: hit.id,
+            vault: v.name,
+            similarity: hit.score,
+            scope: 'note',
+            snippet: v.noteSnippet(hit.id),
+            match: 'keyword',
+          },
+        })),
+      });
+      const pluginTop = new Set(
+        (rankedLists.find((list) => list.name === 'plugin-dense')?.items ?? [])
+          .slice(0, 5)
+          .map((item) => item.path),
+      );
+      const fastAgreement = lexical.slice(0, 5).some((item) => pluginTop.has(item.id));
+      const adaptiveNeedsQuality = !exactQuery || !fastAgreement;
+      const useGemma =
+        (this.profile === 'balanced' || this.profile === 'adaptive' || this.profile === 'quality') &&
+        !(this.profile === 'adaptive' && !adaptiveNeedsQuality);
+      if (useGemma && v.gemma.hasEntries) {
+        try {
+          const hits = await v.gemma.search(query, v.notePathSet(), poolSize, 0.15);
+          rankedLists.push({
+            name: 'embedding-gemma',
+            weight: 1,
+            items: hits.map((hit) => ({
+              path: hit.path,
+              result: {
+                path: hit.path,
+                vault: v.name,
+                similarity: hit.score,
+                scope: 'note',
+                snippet: v.noteSnippet(hit.path),
+              },
+            })),
+          });
+          semanticSucceeded = semanticSucceeded || hits.length > 0;
+        } catch (error) {
+          warnings.push(`${v.name}: EmbeddingGemma unavailable — ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      const fused = new Map<string, { result: SearchResult; score: number; retrieval: string[]; semantic: boolean }>();
+      for (const list of rankedLists) {
+        const seen = new Set<string>();
+        for (let rank = 0; rank < list.items.length; rank++) {
+          const item = list.items[rank];
+          if (seen.has(item.path)) continue;
+          seen.add(item.path);
+          const existing = fused.get(item.path) ?? {
+            result: item.result,
+            score: 0,
+            retrieval: [],
+            semantic: false,
+          };
+          existing.score += list.weight / (60 + rank + 1);
+          if (!existing.retrieval.includes(list.name)) existing.retrieval.push(list.name);
+          if (list.name !== 'bm25') {
+            existing.semantic = true;
+            if (item.result.scope === 'block' || existing.result.match === 'keyword') existing.result = item.result;
+          }
+          fused.set(item.path, existing);
+        }
+      }
+      const ordered = [...fused.values()].sort((a, b) => b.score - a.score);
+      const best = ordered[0]?.score || 1;
+      for (const item of ordered.slice(0, poolSize)) {
+        candidates.push({
+          ...item.result,
+          similarity: round(item.score / best),
+          ...(item.semantic ? { match: undefined } : { match: 'keyword' as const }),
+          retrieval: item.retrieval,
+          scoreType: 'rrf',
+        });
+      }
+    }
+
+    let ranked = candidates.sort((a, b) => {
+      const semanticOrder = Number(a.match === 'keyword') - Number(b.match === 'keyword');
+      return semanticOrder || b.similarity - a.similarity;
+    });
+    const adaptiveNeedsReranker =
+      this.profile === 'adaptive' &&
+      ranked.some((item) => item.retrieval?.includes('embedding-gemma'));
+    const useReranker = this.profile === 'quality' || adaptiveNeedsReranker;
+    if (useReranker && ranked.length > 0) {
+      try {
+        const requestedPool = this.profile === 'adaptive'
+          ? Number(process.env.SMART_RERANK_CANDIDATES ?? 6)
+          : Math.max(limit * 2, 12);
+        const rerankPool = ranked.slice(0, Math.max(1, Math.min(40, requestedPool)));
+        const byId = new Map(rerankPool.map((item) => [`${item.vault}\u0000${item.path}`, item]));
+        const reranked = await rerank(
+          query,
+          rerankPool.map((item) => ({
+            id: `${item.vault}\u0000${item.path}`,
+            text: `${item.path.replace(/\.md$/i, '').replace(/[-_]/g, ' ')}. ${item.snippet}`.slice(0, 2400),
+          })),
+        );
+        const rerankedItems: SearchResult[] = reranked.map(({ id, score }) => {
+            const item = byId.get(id)!;
+            return {
+              ...item,
+              similarity: round(1 / (1 + Math.exp(-score))),
+              retrieval: [...(item.retrieval ?? []), 'reranker'],
+              scoreType: 'reranker' as const,
+            };
+          });
+        ranked = [...rerankedItems, ...ranked.slice(rerankPool.length)];
+      } catch (error) {
+        warnings.push(`reranker unavailable — ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (fallbackVaults.length > 0) {
+      warnings.push(
+        `plugin embedding unavailable for ${fallbackVaults.join(', ')}; hybrid lexical/EmbeddingGemma paths remained available`,
+      );
+    }
+    return {
+      mode: semanticSucceeded ? 'semantic' : 'keyword-fallback',
+      profile: this.profile,
+      ...(warnings.length ? { warning: warnings.join(' | ') } : {}),
+      results: ranked.slice(0, limit),
+    };
+  }
+
+  private bm25For(vault: Vault): BM25Index {
+    const cached = this.bm25.get(vault.name);
+    if (cached?.revision === vault.revision) return cached.index;
+    const index = new BM25Index();
+    const documents = vault.notePaths().flatMap((notePath) => {
+      try {
+        const title = notePath.split('/').pop()!.replace(/\.md$/i, '').replace(/[-_]/g, ' ');
+        return [{ id: notePath, text: `${title} ${vault.readNote(notePath).slice(0, 20_000)}` }];
+      } catch {
+        return [];
+      }
+    });
+    index.build(documents);
+    this.bm25.set(vault.name, { revision: vault.revision, index });
+    return index;
+  }
+
+  private async pluginSearch(
     query: string,
     opts: { vault?: string; scope?: 'notes' | 'blocks' | 'both'; limit?: number; threshold?: number } = {},
   ): Promise<SearchResponse> {
@@ -72,6 +288,7 @@ export class SearchEngine {
     }
     return {
       mode: allFellBack ? 'keyword-fallback' : 'semantic',
+      profile: 'plugin',
       ...(warnings.length ? { warning: warnings.join(' | ') } : {}),
       results: ranked.slice(0, limit),
     };

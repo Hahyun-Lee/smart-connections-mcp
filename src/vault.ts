@@ -3,6 +3,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { blockNotePath, createVaultData, isFrontmatterBlock, parseAjson } from './ajson-loader.js';
+import { EmbeddingGemmaIndex } from './embedding-gemma-index.js';
 import { BlockNotFoundError, NoteNotFoundError } from './errors.js';
 import { resolveInsideVault } from './paths.js';
 import type { SmartEnvConfig, VaultData } from './types.js';
@@ -11,6 +12,7 @@ import { VectorIndex } from './vector-index.js';
 const RELOAD_THROTTLE_MS = 2000;
 const SNIPPET_MAX = 700;
 const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n/;
+const SKIP_DISK_DIRS = new Set(['.git', '.obsidian', '.smart-env', '.trash', 'node_modules', 'Assets']);
 
 function extractModelKey(config: SmartEnvConfig): string {
   const embedModel = config.smart_sources?.embed_model;
@@ -31,15 +33,19 @@ export class Vault {
   readonly name: string;
   readonly path: string;
   readonly modelKey: string;
+  readonly gemma: EmbeddingGemmaIndex;
   data: VaultData;
   index: VectorIndex;
+  revision = 0;
   private fileStates = new Map<string, string>(); // filename -> "mtimeMs:size"
+  private diskFileStates = new Map<string, string>(); // vault-relative path -> "mtimeMs:size"
   private lastCheck = 0;
 
   private constructor(vaultPath: string, name: string, modelKey: string) {
     this.path = vaultPath;
     this.name = name;
     this.modelKey = modelKey;
+    this.gemma = new EmbeddingGemmaIndex(vaultPath);
     this.data = createVaultData();
     this.index = new VectorIndex(1);
   }
@@ -83,7 +89,66 @@ export class Vault {
     this.data = createVaultData();
     this.fileStates = this.listAjsonFiles();
     for (const filename of this.fileStates.keys()) this.parseFile(filename);
+    this.reconcileDiskSources();
     this.rebuildIndex();
+    this.revision++;
+  }
+
+  private listMarkdownFiles(): Map<string, string> {
+    const states = new Map<string, string>();
+    const walk = (directory: string): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(directory, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (entry.name.startsWith('.') || SKIP_DISK_DIRS.has(entry.name)) continue;
+          walk(path.join(directory, entry.name));
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
+        const full = path.join(directory, entry.name);
+        try {
+          const stat = fs.statSync(full);
+          if (stat.size > 2_000_000) continue;
+          states.set(path.relative(this.path, full), `${stat.mtimeMs}:${stat.size}`);
+        } catch {
+          continue;
+        }
+      }
+    };
+    walk(this.path);
+    return states;
+  }
+
+  private reconcileDiskSources(current: Map<string, string> = this.listMarkdownFiles()): boolean {
+    const before = this.diskFileStates;
+    let changed = before.size !== current.size;
+    if (!changed) {
+      for (const [notePath, state] of current) {
+        if (before.get(notePath) !== state) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    const live = new Set(current.keys());
+    for (const notePath of [...this.data.sources.keys()]) {
+      if (!live.has(notePath)) this.data.sources.delete(notePath);
+    }
+    for (const [key] of [...this.data.blocks]) {
+      if (!live.has(blockNotePath(key))) this.data.blocks.delete(key);
+    }
+    for (const notePath of live) {
+      if (!this.data.sources.has(notePath)) {
+        this.data.sources.set(notePath, { path: notePath, embeddings: {}, blocks: {} });
+      }
+    }
+    this.diskFileStates = current;
+    return changed;
   }
 
   private rebuildIndex(): void {
@@ -114,18 +179,22 @@ export class Vault {
     if (now - this.lastCheck < RELOAD_THROTTLE_MS) return;
     this.lastCheck = now;
     const current = this.listAjsonFiles();
+    const diskCurrent = this.listMarkdownFiles();
     const removed = [...this.fileStates.keys()].some((f) => !current.has(f));
     if (removed) {
       this.loadAll();
       return;
     }
     const changed = [...current.entries()].filter(([f, state]) => this.fileStates.get(f) !== state);
-    if (changed.length === 0) return;
+    const diskChanged = this.reconcileDiskSources(diskCurrent);
+    if (changed.length === 0 && !diskChanged) return;
     for (const [f, state] of changed) {
       this.parseFile(f);
       this.fileStates.set(f, state);
     }
+    this.reconcileDiskSources(diskCurrent);
     this.rebuildIndex();
+    this.revision++;
   }
 
   readNote(notePath: string): string {
@@ -166,6 +235,14 @@ export class Vault {
     }
   }
 
+  notePaths(): string[] {
+    return [...this.diskFileStates.keys()].sort();
+  }
+
+  notePathSet(): Set<string> {
+    return new Set(this.diskFileStates.keys());
+  }
+
   paritySample(): { text: string; vec: number[] } | undefined {
     for (const [key, s] of this.data.sources) {
       const vec = s.embeddings?.[this.modelKey]?.vec;
@@ -179,13 +256,32 @@ export class Vault {
     return undefined;
   }
 
-  stats(): { notes: number; blocks: number; indexed: number; embeddingDim: number; modelKey: string } {
+  stats(): {
+    notes: number;
+    blocks: number;
+    indexed: number;
+    embeddingDim: number;
+    modelKey: string;
+    diskNotes: number;
+    pluginIndexedNotes: number;
+    diskOnlyNotes: number;
+    revision: number;
+    embeddingGemma: object;
+  } {
+    const pluginIndexedNotes = [...this.data.sources.values()].filter(
+      (source) => Boolean(source.embeddings?.[this.modelKey]?.vec?.length),
+    ).length;
     return {
       notes: this.data.sources.size,
       blocks: this.data.blocks.size,
       indexed: this.index.size,
       embeddingDim: this.index.dim,
       modelKey: this.modelKey,
+      diskNotes: this.diskFileStates.size,
+      pluginIndexedNotes,
+      diskOnlyNotes: this.diskFileStates.size - pluginIndexedNotes,
+      revision: this.revision,
+      embeddingGemma: this.gemma.stats(this.notePathSet()),
     };
   }
 }

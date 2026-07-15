@@ -48,10 +48,14 @@ export interface SearchResult {
   snippet: string;
   /** set on rows produced by keyword fallback; semantic rows omit it */
   match?: 'keyword';
+  /** retrieval legs that contributed to a hybrid result */
+  retrieval?: string[];
+  scoreType?: 'cosine' | 'rrf' | 'reranker' | 'keyword-count';
 }
 
 export interface SearchResponse {
   mode: 'semantic' | 'keyword-fallback';
+  profile?: 'plugin' | 'fast' | 'balanced' | 'adaptive' | 'quality';
   warning?: string;
   results: SearchResult[];
 }
@@ -79,4 +83,9 @@ export interface VaultInfo {
   indexed?: number;
   embeddingDim?: number;
   modelKey?: string;
+  diskNotes?: number;
+  pluginIndexedNotes?: number;
+  diskOnlyNotes?: number;
+  revision?: number;
+  embeddingGemma?: object;
 }

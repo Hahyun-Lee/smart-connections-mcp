@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { SearchEngine } from './search-engine.js';
 
 export function buildServer(engine: SearchEngine): McpServer {
-  const server = new McpServer({ name: 'smart-connections-mcp', version: '2.0.0' });
+  const server = new McpServer({ name: 'smart-connections-mcp', version: '2.0.0-brainai.1' });
 
   const json = (value: unknown) => ({
     content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
@@ -29,9 +29,8 @@ export function buildServer(engine: SearchEngine): McpServer {
     {
       title: 'Semantic note search',
       description:
-        'Search notes by meaning using the vault\'s own Smart Connections embedding model, run locally. ' +
-        'Returns ranked note- and block-level matches with content snippets. ' +
-        'Falls back to literal keyword matching (mode: "keyword-fallback") only if the embedding model cannot load.',
+        'Search notes locally. Profiles can combine the vault plugin model, EmbeddingGemma, BM25, and an optional reranker. ' +
+        'Returns ranked matches with content snippets and names the retrieval legs that contributed.',
       inputSchema: {
         query: z.string().min(1).describe('Natural-language search query'),
         vault: vaultParam,

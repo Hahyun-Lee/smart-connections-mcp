@@ -24,8 +24,45 @@ const offlineEmbedder: QueryEmbedder = {
 };
 
 function engine(embedder: QueryEmbedder = fakeEmbedder, paths = [FIXTURE_A, FIXTURE_B]) {
-  return new SearchEngine(VaultRegistry.fromPaths(paths), embedder);
+  return new SearchEngine(VaultRegistry.fromPaths(paths), embedder, { profile: 'plugin' });
 }
+
+describe('hybrid profiles', () => {
+  it('uses adaptive when no profile is configured', () => {
+    const previous = process.env.SMART_SEARCH_PROFILE;
+    delete process.env.SMART_SEARCH_PROFILE;
+    try {
+      expect(new SearchEngine(VaultRegistry.fromPaths([FIXTURE_A]), fakeEmbedder).profile).toBe('adaptive');
+    } finally {
+      if (previous === undefined) delete process.env.SMART_SEARCH_PROFILE;
+      else process.env.SMART_SEARCH_PROFILE = previous;
+    }
+  });
+
+  it('finds a disk-only note through the fast BM25 leg', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'scmcp-hybrid-'));
+    try {
+      fs.cpSync(FIXTURE_A, tmp, { recursive: true });
+      fs.writeFileSync(path.join(tmp, 'DiskOnly.md'), '# Disk only\nquasarneedle retrieval coverage\n');
+      const hybrid = new SearchEngine(VaultRegistry.fromPaths([tmp]), offlineEmbedder, { profile: 'fast' });
+      const response = await hybrid.search('quasarneedle', { limit: 5, threshold: 0 });
+      expect(response.profile).toBe('fast');
+      expect(response.results[0].path).toBe('DiskOnly.md');
+      expect(response.results[0].retrieval).toContain('bm25');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an exact agreeing query on the adaptive fast path', async () => {
+    const adaptive = new SearchEngine(VaultRegistry.fromPaths([FIXTURE_A]), fakeEmbedder, { profile: 'adaptive' });
+    const response = await adaptive.search('alpha "apples"', { limit: 5, threshold: 0 });
+    expect(response.results[0].path).toBe('Alpha.md');
+    expect(response.results[0].retrieval).toContain('plugin-dense');
+    expect(response.results[0].retrieval).toContain('bm25');
+    expect(response.results[0].retrieval).not.toContain('reranker');
+  });
+});
 
 describe('search — semantic', () => {
   it('ranks notes and blocks across vaults with snippets', async () => {

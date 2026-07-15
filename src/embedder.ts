@@ -18,9 +18,44 @@ export type PipelineFactory = (
   opts: { dtype: 'fp32' | 'q8' },
 ) => Promise<RawExtractor>;
 
+export function configureTokenizerLimit(
+  tokenizer: {
+    readonly model_max_length?: number;
+    _tokenizerConfig?: { model_max_length?: number };
+    config?: { model_max_length?: number };
+  },
+  modelConfig: { max_position_embeddings?: number } | undefined,
+): number {
+  const configured = Number(modelConfig?.max_position_embeddings);
+  const modelLimit = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 512;
+  const advertised = Number(tokenizer.model_max_length);
+  const safeLimit = Number.isFinite(advertised) && advertised > 0
+    ? Math.min(Math.floor(advertised), modelLimit)
+    : modelLimit;
+  // transformers.js exposes model_max_length as a getter backed by
+  // _tokenizerConfig, so assigning the public property throws in strict mode.
+  if (tokenizer._tokenizerConfig) tokenizer._tokenizerConfig.model_max_length = safeLimit;
+  if (tokenizer.config) tokenizer.config.model_max_length = safeLimit;
+  return safeLimit;
+}
+
 const defaultFactory: PipelineFactory = async (modelId, opts) => {
   const { pipeline } = await import('@huggingface/transformers');
   const p = await pipeline('feature-extraction', modelId, { dtype: opts.dtype });
+  // The feature-extraction pipeline requests truncation, but some tokenizers
+  // advertise an unusably large model_max_length. ONNX then receives more
+  // positions than the model supports (the v2.0.0 parity-probe failure). Bind
+  // truncation to the model's real positional limit before any parity/query run.
+  configureTokenizerLimit(
+    (p as unknown as {
+      tokenizer: {
+        readonly model_max_length?: number;
+        _tokenizerConfig?: { model_max_length?: number };
+        config?: { model_max_length?: number };
+      };
+    }).tokenizer,
+    (p as unknown as { model?: { config?: { max_position_embeddings?: number } } }).model?.config,
+  );
   return p as unknown as RawExtractor;
 };
 

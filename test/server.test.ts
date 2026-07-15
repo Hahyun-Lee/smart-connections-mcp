@@ -17,7 +17,7 @@ function textOf(res: unknown): string {
 }
 
 beforeAll(async () => {
-  const engine = new SearchEngine(VaultRegistry.fromPaths([FIXTURE_A]), fakeEmbedder);
+  const engine = new SearchEngine(VaultRegistry.fromPaths([FIXTURE_A]), fakeEmbedder, { profile: 'plugin' });
   const server = buildServer(engine);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);

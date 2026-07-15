@@ -1,10 +1,20 @@
 import { describe, it, expect } from 'vitest';
-import { Embedder, type PipelineFactory } from '../src/embedder.js';
+import { configureTokenizerLimit, Embedder, type PipelineFactory } from '../src/embedder.js';
 import { EmbedUnavailableError } from '../src/errors.js';
 
 const okExtractor = (vec: number[]) => async () => ({ data: Float32Array.from(vec) });
 
 describe('Embedder', () => {
+  it('caps tokenizer truncation at the model positional limit', () => {
+    const tokenizer = {
+      get model_max_length() { return this._tokenizerConfig.model_max_length; },
+      _tokenizerConfig: { model_max_length: 1_000_000_000_000 },
+      config: { model_max_length: 1_000_000_000_000 },
+    };
+    expect(configureTokenizerLimit(tokenizer, { max_position_embeddings: 512 })).toBe(512);
+    expect(tokenizer.model_max_length).toBe(512);
+  });
+
   it('returns an embed fn from the first working variant and caches it', async () => {
     const calls: string[] = [];
     const factory: PipelineFactory = async (modelId, { dtype }) => {
